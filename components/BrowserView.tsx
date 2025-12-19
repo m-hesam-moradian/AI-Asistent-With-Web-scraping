@@ -39,12 +39,16 @@ export const BrowserView: React.FC<BrowserViewProps> = ({ state }) => {
     <div className="relative w-full h-full">
         {/* Offline Indicator */}
         {!state.isConnected && (
-            <div className="absolute top-0 w-full bg-amber-100 text-amber-800 text-xs py-1 px-4 flex justify-center items-center gap-2 border-b border-amber-200 z-10">
-                <SignalSlashIcon className="w-3 h-3" />
-                <span>Simulated Mode (Local Browser Offline)</span>
+            <div className="absolute top-0 w-full bg-amber-100 text-amber-800 text-xs py-2 px-4 flex flex-col sm:flex-row justify-center items-center gap-2 border-b border-amber-200 z-10 text-center">
+                <div className="flex items-center gap-2">
+                   <SignalSlashIcon className="w-3 h-3" />
+                   <span className="font-bold">Simulated Mode</span>
+                </div>
+                <span className="hidden sm:inline">|</span>
+                <span>Run <code className="bg-amber-200/50 px-1 rounded font-mono">npm start</code> to connect the real browser.</span>
             </div>
         )}
-        <div className="pt-6 h-full">
+        <div className="pt-8 h-full">
             {state.page === 'calendar' && <CalendarPage events={state.calendarEvents} />}
             {state.page === 'email' && <EmailPage emails={state.emails} />}
             {state.page === 'dashboard' && <DashboardPage />}

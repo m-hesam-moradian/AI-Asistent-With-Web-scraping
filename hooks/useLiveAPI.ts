@@ -22,12 +22,12 @@ You have access to tools that simulate a browser. Use them to help the user.
 const TOOLS: FunctionDeclaration[] = [
   {
     name: 'openCalendar',
-    description: 'Navigates to the calendar view.',
+    description: 'Navigates to the calendar view. Returns the list of events.',
     parameters: { type: Type.OBJECT, properties: {} }
   },
   {
     name: 'openEmail',
-    description: 'Navigates to the email inbox.',
+    description: 'Navigates to the email inbox. Returns the list of recent emails.',
     parameters: { type: Type.OBJECT, properties: {} }
   },
   {
@@ -95,6 +95,9 @@ export const useLiveAPI = (apiKey: string) => {
   // Puppeteer WebSocket
   const browserWsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<any>(null);
+  
+  // Pending Tool Requests (Map ID -> Resolve Function)
+  const pendingRequestsRef = useRef<Map<string, (value: any) => void>>(new Map());
 
   const addLog = (message: string, type: LogEntry['type'] = 'info') => {
     setLogs(prev => [...prev.slice(-4), { timestamp: new Date(), message, type }]);
@@ -109,25 +112,32 @@ export const useLiveAPI = (apiKey: string) => {
         ws.onopen = () => {
           setBrowserState(prev => ({ ...prev, isConnected: true }));
           addLog('Connected to Browser Engine', 'success');
-          // Clear any pending reconnect
           if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
         };
 
         ws.onclose = () => {
           setBrowserState(prev => ({ ...prev, isConnected: false }));
-          // Try to reconnect in 3 seconds
+          // Retry to reconnect
           reconnectTimeoutRef.current = setTimeout(connectToBrowser, 3000);
         };
 
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
+            
             if (data.type === 'screenshot') {
               setBrowserState(prev => ({ ...prev, screenshot: data.data, isLoading: false }));
             } else if (data.type === 'url_change') {
               setBrowserState(prev => ({ ...prev, url: data.url }));
             } else if (data.type === 'log') {
                addLog(`Browser: ${data.message}`, 'info');
+            } else if (data.type === 'tool_result' && data.id) {
+               // Resolve pending promise for tool execution
+               const resolve = pendingRequestsRef.current.get(data.id);
+               if (resolve) {
+                 resolve(data.result);
+                 pendingRequestsRef.current.delete(data.id);
+               }
             }
           } catch (e) {
             console.error('Failed to parse browser message', e);
@@ -136,7 +146,6 @@ export const useLiveAPI = (apiKey: string) => {
 
         browserWsRef.current = ws;
       } catch (e) {
-        // If immediate fail, retry
         reconnectTimeoutRef.current = setTimeout(connectToBrowser, 3000);
       }
     };
@@ -153,17 +162,31 @@ export const useLiveAPI = (apiKey: string) => {
     addLog(`Executing: ${name}`, 'tool');
     setBrowserState(prev => ({ ...prev, isLoading: true }));
 
-    // If connected to real browser, send command
+    // --- REAL BROWSER CONNECTION ---
     if (browserWsRef.current && browserWsRef.current.readyState === WebSocket.OPEN) {
-      browserWsRef.current.send(JSON.stringify({
-        type: 'action',
-        tool: name,
-        args: args
-      }));
+      const requestId = Math.random().toString(36).substring(7);
       
-      // We assume the browser via WS will handle the logic and send back screenshots/logs
-      // We return a success immediately to the AI so it can keep talking while the browser works
-      return { status: 'command_sent', message: 'Browser is processing' };
+      return new Promise((resolve) => {
+        // Store resolve function to be called when WS returns 'tool_result'
+        pendingRequestsRef.current.set(requestId, resolve);
+
+        // Send command
+        browserWsRef.current?.send(JSON.stringify({
+          type: 'action',
+          id: requestId,
+          tool: name,
+          args: args
+        }));
+
+        // Safety timeout in case backend crashes
+        setTimeout(() => {
+          if (pendingRequestsRef.current.has(requestId)) {
+             pendingRequestsRef.current.delete(requestId);
+             resolve({ status: 'error', message: 'Browser timed out' });
+             setBrowserState(prev => ({ ...prev, isLoading: false }));
+          }
+        }, 5000);
+      });
     }
 
     // --- FALLBACK SIMULATION (If no real browser connected) ---
@@ -174,9 +197,11 @@ export const useLiveAPI = (apiKey: string) => {
     switch (name) {
       case 'openCalendar':
         setBrowserState(prev => ({ ...prev, page: 'calendar', url: 'https://calendar.agent/view', isLoading: false }));
+        result = { events: [{ id: '1', title: 'Team Sync (Simulated)', time: '10:00 AM', attendees: ['Alice', 'Bob'] }] };
         break;
       case 'openEmail':
         setBrowserState(prev => ({ ...prev, page: 'email', url: 'https://mail.agent/inbox', isLoading: false }));
+        result = { emails: [{ id: '1', from: 'Boss', subject: 'Simulated Email', preview: 'This is a fake email.', time: '9:00 AM', read: false }] };
         break;
       case 'checkAvailability':
          setBrowserState(prev => ({ ...prev, page: 'calendar', url: 'https://calendar.agent/view', isLoading: false }));
@@ -186,10 +211,12 @@ export const useLiveAPI = (apiKey: string) => {
          break;
       case 'bookMeeting':
          addLog(`Booked: ${args.title}`, 'success');
+         result = { status: 'success', booked: args.title };
          break;
       case 'sendEmail':
          setBrowserState(prev => ({ ...prev, page: 'email', url: 'https://mail.agent/sent', isLoading: false }));
          addLog(`Sent email to ${args.to}`, 'success');
+         result = { status: 'success', sentTo: args.to };
          break;
       default:
         setBrowserState(prev => ({ ...prev, isLoading: false }));

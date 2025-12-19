@@ -7,10 +7,17 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3000;
 
-// Initialize Express (optional, if you want to serve static assets later)
+// Initialize Express
 const app = express();
 const server = app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`\x1b[32m
+🚀 SERVER STARTED!
+--------------------------------------------------
+📡 Listening on: http://localhost:${PORT}
+💻 Puppeteer:    Ready to launch browser
+--------------------------------------------------
+Waiting for frontend connection...
+\x1b[0m`);
 });
 
 // Initialize WebSocket Server
@@ -111,72 +118,103 @@ let currentEmails = [
 ];
 
 (async () => {
-  console.log('Launching Browser...');
-  const browser = await puppeteer.launch({
-    headless: "new",
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  });
-  
-  const page = await browser.newPage();
-  await page.setViewport({ width: 1280, height: 800, deviceScaleFactor: 2 });
-  
-  // Start at dashboard
-  await page.setContent(TEMPLATES.dashboard());
-
-  wss.on('connection', async (ws) => {
-    console.log('Frontend connected to Browser Engine');
-
-    // Send initial screenshot immediately
-    await sendScreenshot(page, ws);
-
-    ws.on('message', async (message) => {
-      try {
-        const data = JSON.parse(message);
-        console.log('Action received:', data);
-
-        if (data.type === 'action') {
-          // Handle Navigation & Actions
-          if (data.tool === 'openCalendar' || data.tool === 'checkAvailability') {
-            await page.setContent(TEMPLATES.calendar(currentEvents));
-            ws.send(JSON.stringify({ type: 'url_change', url: 'https://calendar.agent/view' }));
-          
-          } else if (data.tool === 'openEmail') {
-            await page.setContent(TEMPLATES.email(currentEmails));
-            ws.send(JSON.stringify({ type: 'url_change', url: 'https://mail.agent/inbox' }));
-          
-          } else if (data.tool === 'bookMeeting') {
-            const newEvent = {
-              title: data.args.title || 'New Meeting',
-              time: data.args.time || 'Next Hour',
-              attendees: data.args.attendees ? data.args.attendees.split(',') : ['You']
-            };
-            currentEvents.push(newEvent);
-            await page.setContent(TEMPLATES.calendar(currentEvents));
-            ws.send(JSON.stringify({ type: 'log', message: `Booked meeting: ${newEvent.title}` }));
-          
-          } else if (data.tool === 'sendEmail') {
-             // Show "Sent" toast or navigate
-             ws.send(JSON.stringify({ type: 'log', message: `Email sent to ${data.args.to}` }));
-             // Maybe refresh email list to show it sent? For now just stay on page.
-          }
-
-          // Send updated screenshot
-          await new Promise(r => setTimeout(r, 100)); // Small layout buffer
-          await sendScreenshot(page, ws);
-        }
-      } catch (e) {
-        console.error('Error handling message:', e);
-      }
+  try {
+    const browser = await puppeteer.launch({
+      headless: "new",
+      args: [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process', 
+        '--disable-gpu'
+      ]
     });
+    
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 800, deviceScaleFactor: 2 });
+    
+    // Start at dashboard
+    await page.setContent(TEMPLATES.dashboard());
 
-    ws.on('close', () => console.log('Frontend disconnected'));
-  });
+    wss.on('connection', async (ws) => {
+      console.log('✅ Frontend connected to Browser Engine');
 
+      // Send initial screenshot immediately
+      await sendScreenshot(page, ws);
+
+      ws.on('message', async (message) => {
+        try {
+          const data = JSON.parse(message);
+          console.log('Action received:', data);
+
+          if (data.type === 'action') {
+            let toolResult = { status: 'success' };
+            const requestId = data.id; // Correlation ID
+
+            // Handle Navigation & Actions
+            if (data.tool === 'openCalendar' || data.tool === 'checkAvailability') {
+              await page.setContent(TEMPLATES.calendar(currentEvents));
+              ws.send(JSON.stringify({ type: 'url_change', url: 'https://calendar.agent/view' }));
+              // Return actual events data so AI can read it
+              toolResult = { events: currentEvents };
+            
+            } else if (data.tool === 'openEmail') {
+              await page.setContent(TEMPLATES.email(currentEmails));
+              ws.send(JSON.stringify({ type: 'url_change', url: 'https://mail.agent/inbox' }));
+              toolResult = { emails: currentEmails };
+            
+            } else if (data.tool === 'bookMeeting') {
+              const newEvent = {
+                id: Date.now().toString(),
+                title: data.args.title || 'New Meeting',
+                time: data.args.time || 'Next Hour',
+                attendees: data.args.attendees ? data.args.attendees.split(',') : ['You']
+              };
+              currentEvents.push(newEvent);
+              await page.setContent(TEMPLATES.calendar(currentEvents));
+              toolResult = { status: 'success', bookedEvent: newEvent };
+              ws.send(JSON.stringify({ type: 'log', message: `Booked meeting: ${newEvent.title}` }));
+            
+            } else if (data.tool === 'sendEmail') {
+              toolResult = { status: 'success', sentTo: data.args.to };
+              ws.send(JSON.stringify({ type: 'log', message: `Email sent to ${data.args.to}` }));
+            }
+
+            // Send the result back to frontend so it can respond to Gemini
+            if (requestId) {
+              ws.send(JSON.stringify({
+                type: 'tool_result',
+                id: requestId,
+                result: toolResult
+              }));
+            }
+
+            // Send updated screenshot
+            await new Promise(r => setTimeout(r, 100)); // Small layout buffer
+            await sendScreenshot(page, ws);
+          }
+        } catch (e) {
+          console.error('Error handling message:', e);
+        }
+      });
+
+      ws.on('close', () => console.log('❌ Frontend disconnected'));
+    });
+  } catch (error) {
+    console.error("FATAL ERROR: Could not launch Puppeteer.", error);
+  }
 })();
 
 async function sendScreenshot(page, ws) {
   if (ws.readyState === ws.OPEN) {
-    const screenshot = await page.screenshot({ encoding: 'base64', type: 'jpeg', quality: 80 });
-    ws.send(JSON.stringify({ type: 'screenshot', data: screenshot }));
+    try {
+      const screenshot = await page.screenshot({ encoding: 'base64', type: 'jpeg', quality: 80 });
+      ws.send(JSON.stringify({ type: 'screenshot', data: screenshot }));
+    } catch (e) {
+      console.error("Screenshot failed:", e);
+    }
   }
 }
