@@ -1,15 +1,56 @@
 import React from 'react';
 import { BrowserState, CalendarEvent, Email } from '../types';
-import { CalendarIcon, EnvelopeIcon, HomeIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline';
+import { CalendarIcon, EnvelopeIcon, HomeIcon, MagnifyingGlassIcon, SignalSlashIcon, SignalIcon } from '@heroicons/react/24/outline';
 
 interface BrowserViewProps {
   state: BrowserState;
 }
 
 export const BrowserView: React.FC<BrowserViewProps> = ({ state }) => {
-  if (state.page === 'calendar') return <CalendarPage events={state.calendarEvents} />;
-  if (state.page === 'email') return <EmailPage emails={state.emails} />;
-  return <DashboardPage />;
+  // If we have a live screenshot from Puppeteer, show it
+  if (state.isConnected && state.screenshot) {
+    return (
+      <div className="w-full h-full bg-black flex items-center justify-center relative">
+         <div className="absolute top-2 right-2 z-10 bg-green-500/80 text-white text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1">
+            <SignalIcon className="w-3 h-3" />
+            LIVE
+         </div>
+         <img 
+            src={`data:image/jpeg;base64,${state.screenshot}`} 
+            alt="Browser Stream" 
+            className="w-full h-full object-contain"
+         />
+      </div>
+    );
+  }
+
+  // If connected but no screenshot yet (loading)
+  if (state.isConnected && !state.screenshot) {
+      return (
+        <div className="flex flex-col items-center justify-center h-full text-slate-400 bg-slate-50 gap-4">
+            <div className="w-8 h-8 border-2 border-slate-300 border-t-blue-500 rounded-full animate-spin"></div>
+            <p>Waiting for browser stream...</p>
+        </div>
+      );
+  }
+
+  // Fallback: Simulated Pages (when local server is offline)
+  return (
+    <div className="relative w-full h-full">
+        {/* Offline Indicator */}
+        {!state.isConnected && (
+            <div className="absolute top-0 w-full bg-amber-100 text-amber-800 text-xs py-1 px-4 flex justify-center items-center gap-2 border-b border-amber-200 z-10">
+                <SignalSlashIcon className="w-3 h-3" />
+                <span>Simulated Mode (Local Browser Offline)</span>
+            </div>
+        )}
+        <div className="pt-6 h-full">
+            {state.page === 'calendar' && <CalendarPage events={state.calendarEvents} />}
+            {state.page === 'email' && <EmailPage emails={state.emails} />}
+            {state.page === 'dashboard' && <DashboardPage />}
+        </div>
+    </div>
+  );
 };
 
 const DashboardPage = () => (

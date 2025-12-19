@@ -4,6 +4,7 @@ import { createPcmBlob, decode, decodeAudioData } from '../utils/audioUtils';
 import { BrowserState, LogEntry, CalendarEvent, Email } from '../types';
 
 const MODEL_NAME = 'gemini-2.5-flash-native-audio-preview-09-2025';
+const PUPPETEER_WS_URL = 'ws://localhost:3000'; // Local Puppeteer Server
 
 const SYSTEM_INSTRUCTION = `You are an advanced Voice AI Assistant integrated into a web-automation agent. Your primary goal is to listen to user commands, execute browser-based tasks (like managing calendars or messaging), and respond vocally.
 
@@ -75,17 +76,12 @@ export const useLiveAPI = (apiKey: string) => {
   
   // Simulated Browser State
   const [browserState, setBrowserState] = useState<BrowserState>({
-    url: 'https://dashboard.agent/home',
+    isConnected: false,
+    url: 'about:blank',
     page: 'dashboard',
     isLoading: false,
-    calendarEvents: [
-      { id: '1', title: 'Team Sync', time: '10:00 AM', attendees: ['Alice', 'Bob'] },
-      { id: '2', title: 'Lunch with Sarah', time: '12:30 PM', attendees: ['Sarah'] },
-    ],
-    emails: [
-      { id: '1', from: 'Boss', subject: 'Project Update', preview: 'Can we sync later?', time: '9:05 AM', read: false },
-      { id: '2', from: 'Newsletter', subject: 'Weekly Digest', preview: 'Here are the top stories...', time: '8:00 AM', read: true },
-    ]
+    calendarEvents: [],
+    emails: []
   });
 
   // Audio Contexts & Streams
@@ -96,16 +92,82 @@ export const useLiveAPI = (apiKey: string) => {
   const nextStartTimeRef = useRef<number>(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
 
+  // Puppeteer WebSocket
+  const browserWsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<any>(null);
+
   const addLog = (message: string, type: LogEntry['type'] = 'info') => {
     setLogs(prev => [...prev.slice(-4), { timestamp: new Date(), message, type }]);
   };
 
+  // Connect to Puppeteer server with Auto-Reconnect
+  useEffect(() => {
+    const connectToBrowser = () => {
+      try {
+        const ws = new WebSocket(PUPPETEER_WS_URL);
+        
+        ws.onopen = () => {
+          setBrowserState(prev => ({ ...prev, isConnected: true }));
+          addLog('Connected to Browser Engine', 'success');
+          // Clear any pending reconnect
+          if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+        };
+
+        ws.onclose = () => {
+          setBrowserState(prev => ({ ...prev, isConnected: false }));
+          // Try to reconnect in 3 seconds
+          reconnectTimeoutRef.current = setTimeout(connectToBrowser, 3000);
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'screenshot') {
+              setBrowserState(prev => ({ ...prev, screenshot: data.data, isLoading: false }));
+            } else if (data.type === 'url_change') {
+              setBrowserState(prev => ({ ...prev, url: data.url }));
+            } else if (data.type === 'log') {
+               addLog(`Browser: ${data.message}`, 'info');
+            }
+          } catch (e) {
+            console.error('Failed to parse browser message', e);
+          }
+        };
+
+        browserWsRef.current = ws;
+      } catch (e) {
+        // If immediate fail, retry
+        reconnectTimeoutRef.current = setTimeout(connectToBrowser, 3000);
+      }
+    };
+
+    connectToBrowser();
+
+    return () => {
+      browserWsRef.current?.close();
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+    };
+  }, []);
+
   const executeTool = async (name: string, args: any): Promise<any> => {
     addLog(`Executing: ${name}`, 'tool');
-    
-    // Simulate navigation latency
     setBrowserState(prev => ({ ...prev, isLoading: true }));
-    await new Promise(resolve => setTimeout(resolve, 800)); // 800ms simulated delay
+
+    // If connected to real browser, send command
+    if (browserWsRef.current && browserWsRef.current.readyState === WebSocket.OPEN) {
+      browserWsRef.current.send(JSON.stringify({
+        type: 'action',
+        tool: name,
+        args: args
+      }));
+      
+      // We assume the browser via WS will handle the logic and send back screenshots/logs
+      // We return a success immediately to the AI so it can keep talking while the browser works
+      return { status: 'command_sent', message: 'Browser is processing' };
+    }
+
+    // --- FALLBACK SIMULATION (If no real browser connected) ---
+    await new Promise(resolve => setTimeout(resolve, 800)); 
 
     let result: any = { status: 'success' };
 
@@ -118,22 +180,11 @@ export const useLiveAPI = (apiKey: string) => {
         break;
       case 'checkAvailability':
          setBrowserState(prev => ({ ...prev, page: 'calendar', url: 'https://calendar.agent/view', isLoading: false }));
-         result = { events: browserState.calendarEvents };
+         result = { events: [
+            { id: '1', title: 'Team Sync', time: '10:00 AM', attendees: ['Alice', 'Bob'] }
+         ]};
          break;
       case 'bookMeeting':
-         const newEvent: CalendarEvent = {
-           id: Math.random().toString(36).substr(2, 9),
-           title: args.title,
-           time: args.time,
-           attendees: args.attendees ? args.attendees.split(',') : []
-         };
-         setBrowserState(prev => ({ 
-           ...prev, 
-           page: 'calendar', 
-           url: 'https://calendar.agent/view', 
-           isLoading: false,
-           calendarEvents: [...prev.calendarEvents, newEvent]
-         }));
          addLog(`Booked: ${args.title}`, 'success');
          break;
       case 'sendEmail':
@@ -198,7 +249,6 @@ export const useLiveAPI = (apiKey: string) => {
             scriptProcessor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
               
-              // Calculate volume for visualizer
               let sum = 0;
               for (let i = 0; i < inputData.length; i++) {
                 sum += inputData[i] * inputData[i];
@@ -279,7 +329,6 @@ export const useLiveAPI = (apiKey: string) => {
   };
 
   const disconnect = async () => {
-    // Clean up stream tracks
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(track => track.stop());
       mediaStreamRef.current = null;
@@ -287,7 +336,6 @@ export const useLiveAPI = (apiKey: string) => {
 
     if (sessionPromiseRef.current) {
       const session = await sessionPromiseRef.current;
-      // Close session implicitly by stopping stream
     }
     
     inputAudioContextRef.current?.close();

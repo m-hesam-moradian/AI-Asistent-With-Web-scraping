@@ -17,6 +17,8 @@ export interface Email {
 export type PageType = 'dashboard' | 'calendar' | 'email' | 'search';
 
 export interface BrowserState {
+  isConnected: boolean; // Status of the Puppeteer WebSocket
+  screenshot?: string;  // Base64 image data
   url: string;
   page: PageType;
   isLoading: boolean;
