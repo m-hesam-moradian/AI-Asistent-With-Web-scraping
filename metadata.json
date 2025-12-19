@@ -1,0 +1,7 @@
+{
+  "name": "Gemini Voice Agent",
+  "description": "A real-time voice-to-voice AI agent that simulates browser automation tasks using the Gemini Live API.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
